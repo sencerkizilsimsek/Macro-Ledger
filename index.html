@@ -163,6 +163,13 @@
   .btnrow{display:flex; gap:10px}
   .btnrow .btn{flex:1}
   .hint{font-size:12px; color:var(--muted); margin-top:7px; line-height:1.5}
+  .period-row{display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--hair)}
+  .period-row:last-child{border-bottom:0; padding-bottom:0}
+  .period-meta{flex:1; min-width:0}
+  .period-range{font-size:13.5px; color:var(--txt)}
+  .period-vals{font-size:12px; color:var(--muted); margin-top:2px; word-break:break-word}
+  .period-x{flex:0 0 auto; width:32px; height:32px; border-radius:8px; border:1px solid var(--hair2); background:var(--card2); color:var(--txt2); font-size:19px; line-height:1; display:flex; align-items:center; justify-content:center}
+  .period-x:active{filter:brightness(1.1)}
 
   /* stats grid */
   .stats{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px}
@@ -387,7 +394,8 @@ const DEFAULT = {
   profile:{ sex:"male", age:30, height:175, weight:75, activity:1.375,
             proteinMult:1.6, fatPct:30, goalAdjust:0 },
   settings:{ theme:"dark", weightUnit:"kg", heightUnit:"cm", sugarLimitPct:10 },
-  days:{}   // "YYYY-MM-DD": { ov:{...}, foods:[{id,name,kcal,carbs,sugar,protein,fat}] }
+  days:{},  // "YYYY-MM-DD": { ov:{...}, foods:[{id,name,kcal,carbs,sugar,protein,fat}] }
+  periods:[] // [{start:"YYYY-MM-DD", end:"YYYY-MM-DD", ov:{field:value,...}}] — default metrics for a date range
 };
 let state = load();
 let curDate = todayKey();
@@ -403,7 +411,8 @@ function load(){
     return {
       profile:{...DEFAULT.profile, ...(p.profile||{})},
       settings:{...DEFAULT.settings, ...(p.settings||{})},
-      days:p.days||{}
+      days:p.days||{},
+      periods:Array.isArray(p.periods)?p.periods:[]
     };
   }catch(e){ console.warn("load failed",e); return structuredClone(DEFAULT); }
 }
@@ -434,10 +443,21 @@ const wU = ()=> state.settings.weightUnit;
 const hU = ()=> state.settings.heightUnit;
 
 /* ---------- core calc ---------- */
+function periodOv(key){
+  // later-defined periods win on overlap
+  const res={};
+  for(const pr of (state.periods||[])){
+    if(pr && pr.start && pr.end && key>=pr.start && key<=pr.end) Object.assign(res, pr.ov||{});
+  }
+  return res;
+}
 function effective(key){
   const ov = (state.days[key] && state.days[key].ov) || {};
+  const pov = periodOv(key);
   const p = state.profile;
-  const get = f => (ov[f]!==undefined && ov[f]!==null) ? ov[f] : p[f];
+  const get = f => (ov[f]!==undefined && ov[f]!==null) ? ov[f]
+                 : (pov[f]!==undefined && pov[f]!==null) ? pov[f]
+                 : p[f];
   return { sex:get("sex"), age:get("age"), height:get("height"), weight:get("weight"),
            activity:get("activity"), proteinMult:get("proteinMult"),
            fatPct:get("fatPct"), goalAdjust:get("goalAdjust") };
@@ -995,22 +1015,37 @@ function refreshProfilePreview(){
   if(ph) ph.innerHTML=`${profileDraft.proteinMult} × ${r1(wDisp(profileDraft.weight))} ${wU()} = <b class="mono" style="color:var(--txt)">${tg.protein} g</b> protein/day. Common ranges: 1.2 (general), 1.6–2.2 (training/cut).`;
   const uns=body.querySelector("#pUnsaved"); if(uns) uns.style.display=profDirty()?"":"none";
 }
-// mode: "everyday" = apply to all days (retroactive). "future" = today + future only,
-// freezing each existing past day onto the values it had before this change.
-function commitProfile(mode){
+// mode: "everyday" = all days (retroactive). "future" = today + future, freezing past.
+// "period" = only days within range.start..range.end (profile itself untouched).
+function commitProfile(mode, range){
   const old={...state.profile};
   const changed=PROFILE_FIELDS.filter(f=>{
     const a=profileDraft[f], b=old[f];
     return (typeof a==="number"&&typeof b==="number") ? Math.abs(a-b)>1e-9 : a!==b;
   });
-  if(mode==="future" && changed.length){
+  if(!changed.length){ toast("No changes to save"); return; }
+
+  if(mode==="period"){
+    let start=range.start, end=range.end;
+    if(end<start){ const t=start; start=end; end=t; }     // forgiving: swap reversed dates
+    const ov={}; changed.forEach(f=> ov[f]=profileDraft[f]);
+    const existing=state.periods.find(p=>p.start===start && p.end===end);
+    if(existing) existing.ov={...existing.ov, ...ov};      // merge into identical range
+    else state.periods.push({start, end, ov});
+    profileDraft={...state.profile};                      // edits now live in the period, not the profile
+    save(); renderAll();
+    toast(`Saved for ${fmtNum(start)} → ${fmtNum(end)}`);
+    return;
+  }
+
+  if(mode==="future"){
     const today=todayKey();                       // keys are zero-padded → lexicographic = chronological
     Object.keys(state.days).forEach(key=>{
       if(key>=today) return;                       // today & future inherit the new profile
       const day=state.days[key];
       day.ov=day.ov||{};
       changed.forEach(f=>{
-        if(day.ov[f]===undefined || day.ov[f]===null) day.ov[f]=old[f];   // pin old value; don't touch explicit per-day overrides
+        if(day.ov[f]===undefined || day.ov[f]===null) day.ov[f]=old[f];   // pin old value; keep explicit per-day overrides
       });
       if(Object.keys(day.ov).length===0) delete day.ov;
       if(Object.keys(day).length===0) delete state.days[key];
@@ -1020,6 +1055,19 @@ function commitProfile(mode){
   save();
   renderAll();   // refresh Log targets + reset the profile draft
   toast(mode==="future" ? "Saved — applies from today onward" : "Saved for every day");
+}
+function removePeriod(i){ state.periods.splice(i,1); save(); renderAll(); toast("Period removed"); }
+function periodSummary(ov){
+  const parts=[];
+  if(ov.sex!=null) parts.push(ov.sex);
+  if(ov.age!=null) parts.push(ov.age+" yr");
+  if(ov.weight!=null) parts.push(r1(wDisp(ov.weight))+" "+wU());
+  if(ov.height!=null) parts.push(r1(hDisp(ov.height))+" "+hU());
+  if(ov.activity!=null) parts.push("×"+(+ov.activity).toFixed(3));
+  if(ov.proteinMult!=null) parts.push("protein ×"+ov.proteinMult);
+  if(ov.fatPct!=null) parts.push("fat "+ov.fatPct+"%");
+  if(ov.goalAdjust!=null) parts.push((ov.goalAdjust>0?"+":"")+ov.goalAdjust+" kcal");
+  return parts.join(" · ") || "no metrics";
 }
 
 function renderProfile(){
@@ -1080,16 +1128,29 @@ function renderProfile(){
     </div>
 
     <div class="card">
-      <div class="btnrow">
-        <button class="btn ghost" id="pSaveEveryday">Save</button>
-        <button class="btn primary" id="pSaveFuture">Save for future</button>
+      <h2>Save changes</h2>
+      <div class="field">
+        <label>Apply to</label>
+        <div class="seg" id="pScope">
+          <button data-v="everyday">Every day</button>
+          <button data-v="future" class="on">Future ★</button>
+          <button data-v="period">Period</button>
+        </div>
       </div>
-      <p class="hint" style="margin-top:11px">
-        <b style="color:var(--txt)">Save for future</b> <span style="color:var(--amber)">(recommended)</span> applies these to <b>${fmtNum(todayKey())}</b> and every day after. Past days keep the numbers they already had, so your history stays accurate.<br>
-        <b style="color:var(--txt)">Save</b> applies to <b>every</b> day, including past ones — it recalculates old targets too.
-      </p>
+      <div class="row" id="pRange" style="display:none">
+        <div class="field" style="margin-bottom:0"><label>From</label><input class="inp mono" id="pFrom" type="date" value="${todayKey()}"></div>
+        <div class="field" style="margin-bottom:0"><label>To</label><input class="inp mono" id="pTo" type="date" value="${todayKey()}"></div>
+      </div>
+      <button class="btn primary" id="pSave" style="margin-top:12px">Save for today onward</button>
+      <p class="hint" id="pScopeHint" style="margin-top:9px"></p>
       <p class="hint" id="pUnsaved" style="display:none; color:var(--amber); margin-top:7px">● Unsaved changes</p>
     </div>
+    ${state.periods.length ? `
+    <div class="card">
+      <h2>Period defaults</h2>
+      <div id="pPeriodList"></div>
+      <p class="hint" style="margin-top:8px">Each overrides your profile only within its dates. A day you edit directly on the Log screen still wins over a period.</p>
+    </div>` : ""}
   `;
 
   body.querySelectorAll("#pSex button").forEach(b=>b.onclick=()=>{
@@ -1106,8 +1167,46 @@ function renderProfile(){
     body.querySelector(".slider-head .v").textContent="×"+profileDraft.activity.toFixed(3);
     body.querySelector("#pActLab").textContent=actLabel(profileDraft.activity);
     refreshProfilePreview(); };
-  body.querySelector("#pSaveEveryday").onclick=()=>commitProfile("everyday");
-  body.querySelector("#pSaveFuture").onclick=()=>commitProfile("future");
+  // ---- save scope: everyday / future / period ----
+  let scope="future";
+  const scopeSeg=body.querySelector("#pScope");
+  const rangeRow=body.querySelector("#pRange");
+  const saveBtn=body.querySelector("#pSave");
+  const scopeHint=body.querySelector("#pScopeHint");
+  function updateScopeUI(){
+    scopeSeg.querySelectorAll("button").forEach(b=>b.classList.toggle("on", b.dataset.v===scope));
+    rangeRow.style.display = scope==="period" ? "" : "none";
+    saveBtn.textContent = scope==="everyday" ? "Save for every day"
+                        : scope==="future"   ? "Save for today onward"
+                        : "Save for this period";
+    scopeHint.innerHTML = scope==="everyday"
+      ? `Overrides the default on <b>every</b> day, past and future — old targets get recalculated too.`
+      : scope==="future"
+      ? `<span style="color:var(--amber)">Recommended.</span> Overrides the default for <b>${fmtNum(todayKey())}</b> and every day after. Past days keep their existing numbers.`
+      : `Overrides the default only between the two dates. Your everyday profile stays unchanged, and days outside the range are untouched.`;
+  }
+  updateScopeUI();
+  scopeSeg.querySelectorAll("button").forEach(b=>b.onclick=()=>{ scope=b.dataset.v; updateScopeUI(); });
+  saveBtn.onclick=()=>{
+    if(scope==="period"){
+      const start=body.querySelector("#pFrom").value, end=body.querySelector("#pTo").value;
+      if(!start||!end){ toast("Pick both dates"); return; }
+      commitProfile("period",{start,end});
+    } else commitProfile(scope);
+  };
+  // ---- active period list ----
+  const list=body.querySelector("#pPeriodList");
+  if(list){
+    list.innerHTML=state.periods.map((pr,i)=>`
+      <div class="period-row">
+        <div class="period-meta">
+          <div class="period-range mono">${fmtNum(pr.start)} → ${fmtNum(pr.end)}</div>
+          <div class="period-vals">${periodSummary(pr.ov)}</div>
+        </div>
+        <button class="period-x" data-i="${i}" aria-label="Remove period">×</button>
+      </div>`).join("");
+    list.querySelectorAll(".period-x").forEach(b=>b.onclick=()=>removePeriod(+b.dataset.i));
+  }
 }
 
 /* =========================================================
@@ -1199,7 +1298,7 @@ function importData(e){
     try{
       const p=JSON.parse(rd.result);
       if(!p.profile||!p.days) throw new Error("not a Macro Ledger backup");
-      state={ profile:{...DEFAULT.profile,...p.profile}, settings:{...DEFAULT.settings,...(p.settings||{})}, days:p.days||{} };
+      state={ profile:{...DEFAULT.profile,...p.profile}, settings:{...DEFAULT.settings,...(p.settings||{})}, days:p.days||{}, periods:Array.isArray(p.periods)?p.periods:[] };
       save(); applyTheme(); curDate=todayKey(); renderAll(); toast("Backup restored");
     }catch(err){ toast("Couldn't read that file: "+err.message); }
   };
