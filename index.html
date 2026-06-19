@@ -392,6 +392,8 @@ const DEFAULT = {
 let state = load();
 let curDate = todayKey();
 let curRange = 30;
+let profileDraft = null;            // staged (unsaved) profile edits
+const PROFILE_FIELDS = ["sex","age","height","weight","activity","proteinMult","fatPct","goalAdjust"];
 
 function load(){
   try{
@@ -958,17 +960,16 @@ function donut(pK,cK,fK){
 /* =========================================================
    RENDER: PROFILE
    ========================================================= */
-function renderProfile(){
-  const p=state.profile;
-  const tg = (()=>{ // preview target using profile only
-    const e={...p}; const tdee=bmr(e)*e.activity; const kcal=Math.round(tdee+(e.goalAdjust||0));
-    const protein=Math.round(e.proteinMult*e.weight); const fat=Math.round((kcal*e.fatPct/100)/9);
-    const carbs=Math.max(0,Math.round((kcal-protein*4-fat*9)/4));
-    return {kcal,protein,fat,carbs,tdee:Math.round(tdee),bmr:Math.round(bmr(e))};
-  })();
-  const body=document.getElementById("profileBody");
-  body.innerHTML=`
-    <div class="hero" style="margin-bottom:16px">
+function profileTargets(e){
+  const tdee=bmr(e)*e.activity;
+  const kcal=Math.round(tdee+(e.goalAdjust||0));
+  const protein=Math.round(e.proteinMult*e.weight);
+  const fat=Math.round((kcal*e.fatPct/100)/9);
+  const carbs=Math.max(0,Math.round((kcal-protein*4-fat*9)/4));
+  return {kcal,protein,fat,carbs,tdee:Math.round(tdee),bmr:Math.round(bmr(e))};
+}
+function heroInner(tg){
+  return `
       <div class="kcal-readout"><span class="kcal-big mono">${tg.kcal.toLocaleString()}</span><span class="kcal-unit">kcal / day</span></div>
       <div class="kcal-sub">Your maintenance target · BMR <b class="mono">${tg.bmr.toLocaleString()}</b> × activity</div>
       <div class="macros" style="margin-top:14px; margin-bottom:0">
@@ -976,8 +977,59 @@ function renderProfile(){
         <div class="macro"><div class="top"><span class="name"><i class="dot" style="background:var(--carbs)"></i>Carbs</span><span class="val mono"><b>${tg.carbs}</b> g</span></div></div>
         <div class="macro"><div class="top"><span class="name"><i class="dot" style="background:var(--fat)"></i>Fat</span><span class="val mono"><b>${tg.fat}</b> g</span></div></div>
         <div class="macro"><div class="top"><span class="name">TDEE</span><span class="val mono"><b>${tg.tdee.toLocaleString()}</b></span></div></div>
-      </div>
-    </div>
+      </div>`;
+}
+function profDirty(){
+  if(!profileDraft) return false;
+  return PROFILE_FIELDS.some(f=>{
+    const a=profileDraft[f], b=state.profile[f];
+    return (typeof a==="number"&&typeof b==="number") ? Math.abs(a-b)>1e-9 : a!==b;
+  });
+}
+function refreshProfilePreview(){
+  if(!profileDraft) return;
+  const body=document.getElementById("profileBody"); if(!body) return;
+  const tg=profileTargets(profileDraft);
+  const hero=body.querySelector("#pHero"); if(hero) hero.innerHTML=heroInner(tg);
+  const ph=body.querySelector("#pProteinHint");
+  if(ph) ph.innerHTML=`${profileDraft.proteinMult} × ${r1(wDisp(profileDraft.weight))} ${wU()} = <b class="mono" style="color:var(--txt)">${tg.protein} g</b> protein/day. Common ranges: 1.2 (general), 1.6–2.2 (training/cut).`;
+  const uns=body.querySelector("#pUnsaved"); if(uns) uns.style.display=profDirty()?"":"none";
+}
+// mode: "everyday" = apply to all days (retroactive). "future" = today + future only,
+// freezing each existing past day onto the values it had before this change.
+function commitProfile(mode){
+  const old={...state.profile};
+  const changed=PROFILE_FIELDS.filter(f=>{
+    const a=profileDraft[f], b=old[f];
+    return (typeof a==="number"&&typeof b==="number") ? Math.abs(a-b)>1e-9 : a!==b;
+  });
+  if(mode==="future" && changed.length){
+    const today=todayKey();                       // keys are zero-padded → lexicographic = chronological
+    Object.keys(state.days).forEach(key=>{
+      if(key>=today) return;                       // today & future inherit the new profile
+      const day=state.days[key];
+      day.ov=day.ov||{};
+      changed.forEach(f=>{
+        if(day.ov[f]===undefined || day.ov[f]===null) day.ov[f]=old[f];   // pin old value; don't touch explicit per-day overrides
+      });
+      if(Object.keys(day.ov).length===0) delete day.ov;
+      if(Object.keys(day).length===0) delete state.days[key];
+    });
+  }
+  PROFILE_FIELDS.forEach(f=>{ state.profile[f]=profileDraft[f]; });
+  save();
+  renderAll();   // refresh Log targets + reset the profile draft
+  toast(mode==="future" ? "Saved — applies from today onward" : "Saved for every day");
+}
+
+function renderProfile(){
+  const p=state.profile;
+  profileDraft={...p};
+  const tg=profileTargets(profileDraft);
+  const body=document.getElementById("profileBody");
+  body.innerHTML=`
+    <div class="hero" id="pHero" style="margin-bottom:16px">${heroInner(tg)}</div>
+
 
     <div class="card">
       <h2>Body</h2>
@@ -1013,7 +1065,7 @@ function renderProfile(){
       <div class="field">
         <label>Protein multiplier (g per ${wU()} of body weight)</label>
         <input class="inp mono" id="pPMult" type="number" inputmode="decimal" step="0.1" value="${p.proteinMult}">
-        <p class="hint">${p.proteinMult} × ${r1(wDisp(p.weight))} ${wU()} = <b class="mono" style="color:var(--txt)">${tg.protein} g</b> protein/day. Common ranges: 1.2 (general), 1.6–2.2 (training/cut).</p>
+        <p class="hint" id="pProteinHint">${p.proteinMult} × ${r1(wDisp(p.weight))} ${wU()} = <b class="mono" style="color:var(--txt)">${tg.protein} g</b> protein/day. Common ranges: 1.2 (general), 1.6–2.2 (training/cut).</p>
       </div>
       <div class="field">
         <label>Fat target (% of calories)</label>
@@ -1026,17 +1078,36 @@ function renderProfile(){
         <p class="hint">Keep at <b>0</b> to maintain weight. Negative for a cut (e.g. −500 ≈ 0.5 kg/week loss), positive for a lean gain.</p>
       </div>
     </div>
+
+    <div class="card">
+      <div class="btnrow">
+        <button class="btn ghost" id="pSaveEveryday">Save</button>
+        <button class="btn primary" id="pSaveFuture">Save for future</button>
+      </div>
+      <p class="hint" style="margin-top:11px">
+        <b style="color:var(--txt)">Save for future</b> <span style="color:var(--amber)">(recommended)</span> applies these to <b>${fmtNum(todayKey())}</b> and every day after. Past days keep the numbers they already had, so your history stays accurate.<br>
+        <b style="color:var(--txt)">Save</b> applies to <b>every</b> day, including past ones — it recalculates old targets too.
+      </p>
+      <p class="hint" id="pUnsaved" style="display:none; color:var(--amber); margin-top:7px">● Unsaved changes</p>
+    </div>
   `;
 
-  body.querySelectorAll("#pSex button").forEach(b=>b.onclick=()=>{ p.sex=b.dataset.v; save(); renderProfile(); });
+  body.querySelectorAll("#pSex button").forEach(b=>b.onclick=()=>{
+    profileDraft.sex=b.dataset.v;
+    body.querySelectorAll("#pSex button").forEach(x=>x.classList.toggle("on", x.dataset.v===profileDraft.sex));
+    refreshProfilePreview();
+  });
   const bindP=(id,f,conv)=>{ const el=body.querySelector("#"+id);
-    el.onchange=()=>{ let v=parseFloat(el.value); if(!isFinite(v)) return; if(conv) v=conv(v); p[f]=v; save(); renderProfile(); }; };
+    el.oninput=()=>{ let v=parseFloat(el.value); if(!isFinite(v)) return; if(conv) v=conv(v); profileDraft[f]=v; refreshProfilePreview(); }; };
   bindP("pAge","age"); bindP("pWeight","weight",wStore); bindP("pHeight","height",hStore);
   bindP("pPMult","proteinMult"); bindP("pFatPct","fatPct"); bindP("pGoal","goalAdjust");
   const act=body.querySelector("#pAct"); setFill(act);
-  act.oninput=()=>{ setFill(act); body.querySelector(".slider-head .v").textContent="×"+parseFloat(act.value).toFixed(3);
-    body.querySelector("#pActLab").textContent=actLabel(parseFloat(act.value)); };
-  act.onchange=()=>{ p.activity=parseFloat(act.value); save(); renderProfile(); };
+  act.oninput=()=>{ setFill(act); profileDraft.activity=parseFloat(act.value);
+    body.querySelector(".slider-head .v").textContent="×"+profileDraft.activity.toFixed(3);
+    body.querySelector("#pActLab").textContent=actLabel(profileDraft.activity);
+    refreshProfilePreview(); };
+  body.querySelector("#pSaveEveryday").onclick=()=>commitProfile("everyday");
+  body.querySelector("#pSaveFuture").onclick=()=>commitProfile("future");
 }
 
 /* =========================================================
