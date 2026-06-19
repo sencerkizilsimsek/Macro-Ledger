@@ -819,12 +819,16 @@ function renderTrends(){
   // aggregate
   let sumK=0,sumT=0,sumP=0,sumC=0,sumF=0,sumS=0,sumPT=0,sumCT=0,sumFT=0;
   const series=[]; const weightSeries=[];
-  let carryW=null;
+  // weight chart shows measured weigh-ins (per-day ov.weight) carried forward; before the
+  // first weigh-in we carry the first value BACKWARD, so we never draw the present weight in the past.
+  const realW={}; let firstReal=null;
+  for(const k of keys){ const ov=(state.days[k]&&state.days[k].ov)||{};
+    if(ov.weight!=null){ realW[k]=ov.weight; if(firstReal==null) firstReal=ov.weight; } }
+  let carryW = firstReal!=null ? firstReal : state.profile.weight;
   for(const k of keys){
     const tg=targets(k); const tot=totals(k); const has=dayFoods(k).length>0;
-    const ov=(state.days[k]&&state.days[k].ov)||{};
-    if(ov.weight!=null) carryW=ov.weight;
-    weightSeries.push({k, w: carryW!=null?carryW:state.profile.weight, real: ov.weight!=null});
+    if(realW[k]!=null) carryW=realW[k];
+    weightSeries.push({k, w:carryW, real: realW[k]!=null});
     series.push({k, intake:tot.kcal, target:tg.kcal, has});
     if(has){ sumK+=tot.kcal; sumT+=tg.kcal; sumP+=tot.protein; sumC+=tot.carbs; sumF+=tot.fat; sumS+=tot.sugar;
              sumPT+=tg.protein; sumCT+=tg.carbs; sumFT+=tg.fat; }
@@ -894,32 +898,46 @@ function currentStreak(){
 }
 
 /* ---------- SVG charts ---------- */
+// Uniform (non-distorting) responsive sizing — fills width, scales height proportionally,
+// so text stays crisp and weigh-in dots stay round.
+function svgWrap(W,H,inner){
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block;overflow:visible">${inner}</svg>`;
+}
+function dateLabel(k){ const d=keyToDate(k); return d.getDate()+"/"+(d.getMonth()+1); }
+function labelIdx(n,c){
+  if(n<=1) return [0];
+  c=Math.min(c,n); const idx=[];
+  for(let j=0;j<c;j++) idx.push(Math.round(j*(n-1)/(c-1)));
+  return [...new Set(idx)];
+}
+function xAxisLabels(keys, xFn, W, padL, padR, H){
+  const n=keys.length;
+  return labelIdx(n,4).map(i=>{
+    const anchor = i===0?"start" : i===n-1?"end" : "middle";
+    const xx = i===0?padL : i===n-1?(W-padR) : xFn(i);
+    return `<text x="${xx.toFixed(1)}" y="${H-6}" font-size="11" fill="var(--faint)" text-anchor="${anchor}" font-family="var(--mono)">${dateLabel(keys[i])}</text>`;
+  }).join("");
+}
 function barChart(series){
-  const W=480,H=150, padB=18, padT=8, padL=4, padR=4;
+  const W=480,H=172, padB=22, padT=8, padL=6, padR=6;
   const n=series.length; const iw=W-padL-padR; const ih=H-padT-padB;
   const maxV=Math.max(1,...series.map(s=>Math.max(s.intake,s.target)))*1.08;
-  const bw=Math.max(2, iw/n*0.62); const step=iw/n;
-  let bars="", line="", pts=[];
+  const step=iw/n; const bw=Math.max(2, step*0.62);
+  let bars="", pts=[];
   series.forEach((s,i)=>{
     const x=padL+step*i+step/2;
     const bh=s.has? (s.intake/maxV)*ih : 0;
     const y=padT+ih-bh;
     const over=s.intake>s.target;
     if(s.has) bars+=`<rect x="${(x-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0,bh).toFixed(1)}" rx="2" fill="${over?'var(--over)':'var(--amber)'}" opacity="${over?0.95:0.85}"/>`;
-    const ty=padT+ih-(s.target/maxV)*ih;
-    pts.push([x,ty]);
+    pts.push([x, padT+ih-(s.target/maxV)*ih]);
   });
-  // target polyline
-  line=`<polyline fill="none" stroke="var(--txt2)" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.7" points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(" ")}"/>`;
-  // x labels: first / mid / last
-  const labIdx=[0, Math.floor(n/2), n-1].filter((v,i,a)=>a.indexOf(v)===i);
-  let labs="";
-  labIdx.forEach(i=>{ const x=padL+step*i+step/2; const d=keyToDate(series[i].k);
-    labs+=`<text x="${x.toFixed(1)}" y="${H-4}" font-size="9" fill="var(--faint)" text-anchor="middle" font-family="var(--mono)">${d.getDate()}/${d.getMonth()+1}</text>`; });
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:150px">${bars}${line}${labs}</svg>`;
+  const line=`<polyline fill="none" stroke="var(--txt2)" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.7" points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(" ")}"/>`;
+  const labs=xAxisLabels(series.map(s=>s.k), i=>padL+step*i+step/2, W, padL, padR, H);
+  return svgWrap(W,H, `${bars}${line}${labs}`);
 }
 function lineChart(series,unit){
-  const W=480,H=140,padB=18,padT=10,padL=4,padR=4;
+  const W=480,H=172,padB=22,padT=10,padL=6,padR=6;
   const n=series.length, iw=W-padL-padR, ih=H-padT-padB;
   const vals=series.map(s=>s.v);
   let mn=Math.min(...vals), mx=Math.max(...vals);
@@ -929,13 +947,14 @@ function lineChart(series,unit){
   const pts=series.map((s,i)=>[x(i),y(s.v)]);
   const path=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ");
   const area=`M${pts[0][0].toFixed(1)} ${(padT+ih).toFixed(1)} `+pts.map(p=>"L"+p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" ")+` L${pts[pts.length-1][0].toFixed(1)} ${(padT+ih).toFixed(1)} Z`;
-  let dots=""; series.forEach((s,i)=>{ if(s.real) dots+=`<circle cx="${x(i).toFixed(1)}" cy="${y(s.v).toFixed(1)}" r="3" fill="var(--amber)" stroke="var(--bg)" stroke-width="1.5"/>`; });
-  const labs=`<text x="${padL}" y="11" font-size="9" fill="var(--faint)" font-family="var(--mono)">${r1(mx)}</text>
-              <text x="${padL}" y="${(padT+ih+2).toFixed(1)}" font-size="9" fill="var(--faint)" font-family="var(--mono)">${r1(mn)}</text>`;
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:140px">
+  let dots=""; series.forEach((s,i)=>{ if(s.real) dots+=`<circle cx="${x(i).toFixed(1)}" cy="${y(s.v).toFixed(1)}" r="3.2" fill="var(--amber)" stroke="var(--bg)" stroke-width="1.5"/>`; });
+  const yLabs=`<text x="${padL}" y="12" font-size="11" fill="var(--faint)" font-family="var(--mono)">${r1(mx)}</text>
+              <text x="${padL}" y="${(padT+ih+1).toFixed(1)}" font-size="11" fill="var(--faint)" font-family="var(--mono)">${r1(mn)}</text>`;
+  const xLabs=xAxisLabels(series.map(s=>s.k), x, W, padL, padR, H);
+  return svgWrap(W,H, `
     <path d="${area}" fill="var(--amber)" opacity="0.08"/>
     <path d="${path}" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    ${dots}${labs}</svg>`;
+    ${dots}${yLabs}${xLabs}`);
 }
 function macroBars(rows){
   let h="";
